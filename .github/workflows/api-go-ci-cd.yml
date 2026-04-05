@@ -5,10 +5,12 @@ on:
   push:
     paths:
       - "APIs para exercícios/api-go/**"
+      - "Dockerfile.api-go"
       - ".github/workflows/api-go-ci-cd.yml"
   pull_request:
     paths:
       - "APIs para exercícios/api-go/**"
+      - "Dockerfile.api-go"
 
 permissions:
   contents: read
