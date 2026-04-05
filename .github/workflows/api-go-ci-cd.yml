@@ -1,0 +1,169 @@
+# Secrets opcionais: SONAR_TOKEN, DOCKERHUB_USERNAME/TOKEN, RENDER_*, STAGING_URL
+name: API Go - CI/CD
+
+on:
+  push:
+    paths:
+      - "APIs para exercícios/api-go/**"
+      - ".github/workflows/api-go-ci-cd.yml"
+  pull_request:
+    paths:
+      - "APIs para exercícios/api-go/**"
+
+permissions:
+  contents: read
+
+env:
+  API_GO_DIR: APIs para exercícios/api-go
+  IMAGE_NAME: api-go
+
+jobs:
+  lint-test:
+    name: CI - build, lint, testes
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: apigo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d apigo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/apigo_test?sslmode=disable
+    defaults:
+      run:
+        working-directory: "APIs para exercícios/api-go"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.5"
+          cache-dependency-path: "APIs para exercícios/api-go/go.sum"
+
+      - name: Go mod, vet, build
+        run: go mod verify && go vet ./... && go build -o /tmp/api-go .
+
+      - name: golangci-lint
+        working-directory: "APIs para exercícios/api-go"
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.2
+          "$(go env GOPATH)/bin/golangci-lint" run --timeout=5m
+
+      - name: Testes unitarios (short)
+        run: go test ./... -race -count=2 -short
+
+      - name: Testes de integracao (PostgreSQL)
+        run: go test ./... -count=1 -run TestPostgresUserRepository_CRUD -v
+
+  semgrep:
+    name: CI - SAST (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan
+        run: semgrep scan --config auto --error --exclude-rule go.lang.security.audit.net.use-tls.use-tls "APIs para exercícios/api-go"
+
+  sonarcloud:
+    name: CI - SonarCloud
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@v2.0.2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: "APIs para exercícios/api-go"
+
+  container:
+    name: Container - Hadolint, build, Trivy
+    runs-on: ubuntu-latest
+    needs: [lint-test]
+    defaults:
+      run:
+        working-directory: "APIs para exercícios/api-go"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: "APIs para exercícios/api-go/Dockerfile"
+          failure-threshold: error
+
+      - name: Build imagem
+        run: docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+
+      - name: Scan Trivy (CRITICAL, HIGH)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: "${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          exit-code: "0"
+          format: table
+
+      - name: Docker Hub login e push
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DH_USER" ] || [ -z "$DH_TOKEN" ]; then echo "Skip Docker Hub (sem secrets)"; exit 0; fi
+          echo "$DH_TOKEN" | docker login -u "$DH_USER" --password-stdin
+          TAG="${DH_USER}/${{ env.IMAGE_NAME }}:latest"
+          docker tag "${{ env.IMAGE_NAME }}:${{ github.sha }}" "$TAG"
+          docker push "$TAG"
+
+  deploy-homolog:
+    name: CD - Homologacao (Render hook)
+    runs-on: ubuntu-latest
+    needs: [container]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Disparar deploy
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "Skip homolog (sem RENDER_DEPLOY_HOOK_URL)"; exit 0; fi
+          curl -fsS -X POST "$HOOK"
+
+  dast-zap:
+    name: CD - DAST (OWASP ZAP baseline)
+    runs-on: ubuntu-latest
+    needs: [deploy-homolog]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: OWASP ZAP baseline
+        uses: zaproxy/action-baseline@v0.12.0
+        continue-on-error: true
+        with:
+          target: ${{ secrets.STAGING_URL }}
+
+  deploy-prod:
+    name: CD - Producao (aprovacao manual)
+    runs-on: ubuntu-latest
+    needs: [container]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: production
+    steps:
+      - name: Disparar deploy producao
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL_PROD }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "Skip prod (sem RENDER_DEPLOY_HOOK_URL_PROD)"; exit 0; fi
+          curl -fsS -X POST "$HOOK"

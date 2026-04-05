@@ -1,13 +1,22 @@
 package main
 
 import (
-	"net/http"
+	"database/sql"
 	"log"
+	"net/http"
+	"os"
+
 	"api-go/user"
+
+	_ "github.com/lib/pq"
 )
 
 func main() {
-	repo := user.NewUserRepository()
+	repo, cleanup := buildRepository()
+	if cleanup != nil {
+		defer cleanup()
+	}
+
 	service := user.NewUserService(repo)
 	controller := user.NewUserController(service)
 
@@ -33,6 +42,32 @@ func main() {
 		}
 	})
 
-	log.Println("Server running on http://localhost:3000")
-	log.Fatal(http.ListenAndServe(":3001", mux))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3000"
+	}
+
+	log.Printf("Server running on http://localhost:%s", port)
+	log.Fatal(http.ListenAndServe(":"+port, mux))
+}
+
+func buildRepository() (user.UserRepository, func()) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		log.Println("DATABASE_URL not set; using in-memory repository")
+		return user.NewUserRepository(), nil
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := db.Ping(); err != nil {
+		log.Fatal(err)
+	}
+	if err := user.MigratePostgres(db); err != nil {
+		log.Fatal(err)
+	}
+	log.Println("Using PostgreSQL repository")
+	return user.NewPostgresUserRepository(db), func() { _ = db.Close() }
 }
