@@ -1,0 +1,39 @@
+# Análise SonarCloud única para o repositório (Go + JS).
+# Evita segundo projeto no Sonar quando o repo já está ligado a Ezequiel-end_gerencia-de-config.
+name: SonarCloud - repositório (Go + JS)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "APIs para exercícios/api-go/**"
+      - "APIs para exercícios/api-js/**"
+      - "sonar-project.properties"
+      - ".github/workflows/sonar-cloud-repo.yml"
+  pull_request:
+    paths:
+      - "APIs para exercícios/api-go/**"
+      - "APIs para exercícios/api-js/**"
+      - "sonar-project.properties"
+
+permissions:
+  contents: read
+
+jobs:
+  sonarcloud:
+    name: SonarCloud (api-go + api-js)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@v2.0.2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: "."
