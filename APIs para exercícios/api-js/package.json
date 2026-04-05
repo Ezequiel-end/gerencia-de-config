@@ -1,20 +1,29 @@
 {
-  "dependencies": {
-    "express": "^5.2.1",
-    "knex": "^3.1.0",
-    "pg": "^8.20.0",
-    "sequelize": "^6.37.8",
-    "dotenv": "^16.4.5"
-  },
-  "name": "testando-knex",
+  "name": "api-js",
   "version": "1.0.0",
-  "description": "",
+  "description": "API Node (atividade Docker / Compose / CI-CD)",
   "main": "index.js",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "build": "node -e \"import('./router.js').then(() => console.log('build ok'))\"",
+    "lint": "eslint .",
+    "test": "node --test test/unit.mjs",
+    "test:integration": "node test/integration-postgres.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "module"
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "knex": "^3.1.0",
+    "pg": "^8.20.0",
+    "sequelize": "^6.37.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.15.0",
+    "eslint": "^9.15.0",
+    "globals": "^15.12.0"
+  }
 }

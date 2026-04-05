@@ -1,0 +1,184 @@
+# Pipeline só da API JS — não altera api-go-ci-cd.yml nem segunda-pipeline.
+#
+# Secrets recomendados (JS, separados do Go):
+#   DOCKERHUB_USERNAME, DOCKERHUB_TOKEN     → iguais aos do Go (mesma conta Hub)
+#   RENDER_DEPLOY_HOOK_URL_JS               → Deploy Hook do Web Service Node (homolog)
+#   RENDER_DEPLOY_HOOK_URL_PROD_JS          → Deploy Hook produção Node
+#   STAGING_URL_JS                          → URL pública homolog JS (ZAP), ex. https://xxx.onrender.com
+#   SONAR_TOKEN                             → SonarCloud (pode ser o mesmo token; projeto key diferente)
+#
+# GitHub → Settings → Environments → criar "production-js" com Required reviewers (aprovação manual CD prod JS)
+
+name: API JS - CI/CD
+
+on:
+  push:
+    paths:
+      - "APIs para exercícios/api-js/**"
+      - "Dockerfile.api-js"
+      - ".github/workflows/api-js-ci-cd.yml"
+  pull_request:
+    paths:
+      - "APIs para exercícios/api-js/**"
+      - "Dockerfile.api-js"
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: api-js
+
+jobs:
+  lint-test:
+    name: CI - build, lint, testes
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: apijs_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d apijs_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DB_HOST: localhost
+      DB_NAME: apijs_test
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_DIALECT: postgres
+    defaults:
+      run:
+        working-directory: "APIs para exercícios/api-js"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: npm install
+        run: npm install
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Testes unitarios
+        run: npm run test
+
+      - name: Testes integracao (PostgreSQL)
+        run: npm run test:integration
+
+  semgrep:
+    name: CI - SAST (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan
+        run: semgrep scan --config auto --error "APIs para exercícios/api-js"
+
+  sonarcloud:
+    name: CI - SonarCloud
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@v2.0.2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: "APIs para exercícios/api-js"
+
+  container:
+    name: Container - Hadolint, build, Trivy
+    runs-on: ubuntu-latest
+    needs: [lint-test]
+    defaults:
+      run:
+        working-directory: "APIs para exercícios/api-js"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: "APIs para exercícios/api-js/Dockerfile"
+          failure-threshold: error
+          ignore: DL3016
+
+      - name: Build imagem
+        run: docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+
+      - name: Scan Trivy (CRITICAL, HIGH)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: "${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          exit-code: "0"
+          format: table
+
+      - name: Docker Hub login e push
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DH_USER" ] || [ -z "$DH_TOKEN" ]; then echo "Skip Docker Hub (sem secrets)"; exit 0; fi
+          echo "$DH_TOKEN" | docker login -u "$DH_USER" --password-stdin
+          TAG="${DH_USER}/${{ env.IMAGE_NAME }}:latest"
+          docker tag "${{ env.IMAGE_NAME }}:${{ github.sha }}" "$TAG"
+          docker push "$TAG"
+
+  deploy-homolog-js:
+    name: CD - Homologacao JS (Render hook)
+    runs-on: ubuntu-latest
+    needs: [container]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Disparar deploy
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL_JS }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "Skip homolog JS (sem RENDER_DEPLOY_HOOK_URL_JS)"; exit 0; fi
+          curl -fsS -X POST "$HOOK"
+
+  dast-zap-js:
+    name: CD - DAST JS (OWASP ZAP baseline)
+    runs-on: ubuntu-latest
+    needs: [deploy-homolog-js]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: OWASP ZAP baseline
+        uses: zaproxy/action-baseline@v0.12.0
+        continue-on-error: true
+        with:
+          target: ${{ secrets.STAGING_URL_JS }}
+
+  deploy-prod-js:
+    name: CD - Producao JS (aprovacao manual)
+    runs-on: ubuntu-latest
+    needs: [container]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: production-js
+    steps:
+      - name: Disparar deploy producao
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL_PROD_JS }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "Skip prod JS (sem RENDER_DEPLOY_HOOK_URL_PROD_JS)"; exit 0; fi
+          curl -fsS -X POST "$HOOK"
